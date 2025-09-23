@@ -18,9 +18,8 @@ def lambda_handler(event, context):
         response = ssm.get_parameter(Name=parameter_name, WithDecryption=True)
         key = response["Parameter"]["Value"]
 
-        # Bucket + log file
+        # Bucket
         bucket_name = "daen-kings-ransom"
-        log_file_key = "logs/LogLastRequested.txt"
 
         # JSON serializer
         def json_serial(obj):
@@ -44,22 +43,25 @@ def lambda_handler(event, context):
         clientIds = ["88884419", "88884418"]   # Pearmund, Effingham
         absoluteStartDate = "2024-01-01"
 
-        # Get last processed date from log (or seed from 2024-01-01)
-        try:
-            response = s3.get_object(Bucket=bucket_name, Key=log_file_key)
-            log_contents = response["Body"].read().decode("utf-8").strip()
-            start_date = datetime.datetime.strptime(log_contents, "%Y-%m-%d").date()
-            print(f"📖 Resuming from log date: {start_date}")
-        except s3.exceptions.NoSuchKey:
-            start_date = datetime.datetime.strptime(absoluteStartDate, "%Y-%m-%d").date()
-            s3.put_object(Bucket=bucket_name, Key=log_file_key, Body=absoluteStartDate.encode("utf-8"))
-            print(f"🆕 No log found. Starting fresh at {start_date}")
-
         today = datetime.date.today()
 
         # --- Orders (monthly aggregation) ---
         for clientId in clientIds:
+            log_file_key = f"logs/LogLastRequested-{clientId}.txt"
+
+            # Try to resume from log, else seed
+            try:
+                response = s3.get_object(Bucket=bucket_name, Key=log_file_key)
+                log_contents = response["Body"].read().decode("utf-8").strip()
+                start_date = datetime.datetime.strptime(log_contents, "%Y-%m-%d").date()
+                print(f"📖 Resuming {clientId} from log date: {start_date}")
+            except s3.exceptions.NoSuchKey:
+                start_date = datetime.datetime.strptime(absoluteStartDate, "%Y-%m-%d").date()
+                s3.put_object(Bucket=bucket_name, Key=log_file_key, Body=absoluteStartDate.encode("utf-8"))
+                print(f"🆕 No log found for {clientId}. Starting fresh at {start_date}")
+
             current_date = start_date
+
             while current_date <= today:
                 # month boundaries
                 year, month = current_date.year, current_date.month
@@ -71,7 +73,7 @@ def lambda_handler(event, context):
                 crawl_date = month_start
 
                 while crawl_date <= min(month_end, today):
-                    A = crawl_date.strftime("%m-%d-%Y")  # Orders require MM-DD-YYYY
+                    A = crawl_date.strftime("%m-%d-%Y")
                     url = api_url(orderTable, clientId, A, orders=True)
                     try:
                         r = api_call(url, key)
@@ -95,7 +97,7 @@ def lambda_handler(event, context):
 
                     crawl_date += datetime.timedelta(days=1)
 
-                # save monthly file if data exists
+                # Save monthly file if data exists
                 if all_data:
                     month_key = month_start.strftime("%Y-%m-01")
                     json_file_key = f"WineryData/{orderTable}-{clientId}-{month_key}.json"
@@ -106,12 +108,15 @@ def lambda_handler(event, context):
                     )
                     print(f"✅ Saved orders for {clientId} → {json_file_key}")
 
-                # update log after finishing this month
-                s3.put_object(Bucket=bucket_name, Key=log_file_key,
-                              Body=month_end.strftime("%Y-%m-%d").encode("utf-8"))
-                print(f"📝 Updated log to {month_end}")
+                # Update log after finishing this month
+                s3.put_object(
+                    Bucket=bucket_name,
+                    Key=log_file_key,
+                    Body=month_end.strftime("%Y-%m-%d").encode("utf-8")
+                )
+                print(f"📝 Updated log for {clientId} → {month_end}")
 
-                # move to next month
+                # Move to next month
                 current_date = month_end + datetime.timedelta(days=1)
 
         return {"status": "Order ingestion completed", "api_key_retrieved": True}
